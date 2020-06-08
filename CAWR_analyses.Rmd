@@ -1,0 +1,1111 @@
+---
+title: "CAWR"
+author: "Colleen Nell Ph.D.  |  collnell@gwu.edu  |  www.collnell.com"
+date: "Last updated `r Sys.time()`"
+output:
+  html_document:
+    always_allow_html: yes
+    df_print: paged
+    highlight: tango
+    theme: united
+  pdf_document: default
+  word_document: default
+---
+
+------------------------   
+  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE, cache=TRUE)
+
+se<-function(x) sd(x, na.rm=TRUE)/sqrt(length(x))
+num<-function(x)length(unique(na.omit(x)))
+
+library(tidyverse);library(readxl);library(reshape2);library(DT)
+library(cowplot);library(ggrepel)
+library(vegan)
+library(lme4);library(emmeans);library(broom);library(purrr)
+library(patchwork);library(scico)
+
+
+theme_set(theme_classic(base_size=11))
+## relative read abundance RRA - the percentages of all sequences assigned to a given OTU for each sample
+# Kartzinel 2015
+## territory palette
+pal_terr<-c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a")
+
+set.seed(444)
+
+```
+
+## DATA IMPORT  
+
+### CAWR diet analysis  
+  
+```{r}
+# the clean otu blasts, sample info
+samps<-read_excel('data/cawr_otu_ids.xlsx', sheet=2)%>%mutate(`#OTU ID` = gsub('denovo', 'OTU', `#OTU ID`))
+
+# how many samples? ow many reared DNA? how many otus/ids per sample?
+otu.melt<-samps%>%
+  melt(id.vars='#OTU ID', variable.name='sample')%>%
+  filter(value > 0, sample != 'Totals')
+
+ids<-read_excel('data/cawr_otu_ids.xlsx', sheet=3)%>%
+  mutate(SPECIES = ifelse(LEVEL != 'SPECIES' & !is.na(SPECIES), NA, SPECIES),
+         LEVEL = case_when(LEVEL == 'SPECIES' & `BOLD PERCENT` < 99.3 ~ 'GENUS', TRUE ~ LEVEL),
+         GENUS = ifelse(FINAL_ID == FAMILY, NA, ifelse(FINAL_ID == ORDER, NA,GENUS)),
+         FAMILY = ifelse(FINAL_ID == ORDER, NA, FAMILY),
+         LEVEL = case_when(FINAL_ID == GENUS ~ 'GENUS',
+                           FINAL_ID == FAMILY ~ 'FAMILY',
+                           FINAL_ID == ORDER ~ 'ORDER',
+                           TRUE ~ LEVEL))%>%
+  mutate(ORDER = case_when(is.na(ORDER) ~ FINAL_ID, TRUE ~ ORDER), 
+         CLASS = case_when(ORDER %in% c('Araneae') ~ 'Arachnida',
+                           ORDER == 'Isopoda' ~ 'Malacostraca', 
+                           TRUE ~ 'Insecta'))%>%
+  mutate(ORDER = case_when(ORDER == 'Psocodea' ~ 'Psocoptera', TRUE ~ ORDER))
+
+# otus with GOOD IDS - filter out 'NO MATCH' and 'NONE' in ID_BASIS
+good.id<-ids%>%filter(is.na(`NO MATCH`) | `NO MATCH` == 'M' | ID_BASIS != 'NONE', !is.na(LEVEL))
+#num(good.id$OTU) #300
+
+## mean similarity in BOLD?
+#mean(good.id$`BOLD PERCENT`, na.rm=TRUE)
+#se(good.id$`BOLD PERCENT`)
+otu.ct<-otu.melt%>%group_by(sample)%>%summarize(otus=length(unique(`#OTU ID`)))
+#otu.ct
+#median(otu.ct$otus) #15
+#mean(otu.ct$otus) #18.11
+
+```  
+
+#### Figure S3 - Ranking importance of prey orders in diet    
+Order frequency, OTU richness, species richness from fecal samples  
+```{r, eval=FALSE}
+## what percent of each diet sample (otus) are 'diet'?
+
+## total by order
+id.ord<-otu.melt%>%
+  left_join(good.id, by=c('#OTU ID'='OTU'))%>%
+  filter(!is.na(FINAL_ID))%>%
+  group_by(ORDER)%>%
+  summarize(similarity = round(mean(`BOLD PERCENT`, na.rm=TRUE),2), 
+            samples=round(100*(length(unique(sample))/28),2), 
+            RRA = round(100*(sum(value)/69475),2))
+
+# number of otus per id
+otu.l<-otu.melt%>%
+  left_join(good.id, by=c('#OTU ID'='OTU'))%>%
+  filter(!is.na(FINAL_ID))%>%
+  group_by(sample, ORDER,FINAL_ID)%>%
+  summarize(otus=length(unique(`#OTU ID`)))
+
+## what percent of each diet sample (otus) are 'diet'?
+diet.perc<-otu.l%>%
+  mutate(type=ifelse(ORDER %in% c('Araneae','Coleoptera','Blattodea','Diptera','Isopoda','Lepidoptera','Orthoptera'), 'prey', 'not'))%>%
+  group_by(sample, type)%>%
+  summarize(n=sum(otus))%>%
+  dcast(sample~type, fill=0)%>%
+  mutate(total=prey+not, prey=prey/total)
+
+#mean(diet.perc$prey)
+
+# how many separate OTUs per order per fecal sample, and ids
+otu.sample.rich<-otu.l%>%
+  group_by(sample, ORDER)%>%
+  summarize(ids=length(unique(FINAL_ID)), id_sum=sum(otus))%>%
+  group_by(ORDER)%>%
+  summarize(otu_n_mean = mean(id_sum), otu_n_se=se(id_sum), 
+            id_mean = mean(ids), id_se = se(ids), 
+            samps= length(unique(sample)))
+
+# breakdown by orders, combine all order-level calcs
+ord.id<-good.id%>%
+  group_by(CLASS, ORDER)%>%
+  summarize(OTU = length(unique(OTU)), n_fam= length(unique(na.omit(FAMILY))), n_sp = length(unique(na.omit(SPECIES))))%>%
+  arrange(CLASS, ORDER)%>%
+  left_join(id.ord)%>%
+  left_join(otu.sample.rich)
+  
+ord.id%>%ungroup()%>%dplyr::select(ORDER, samples, OTU, RRA, id_mean, otu_n_mean)%>%melt(id.vars='ORDER')%>%
+  ggplot(aes(ORDER, value))+
+  geom_bar(stat='identity')+
+  facet_wrap(~variable, scales='free_x')+
+  coord_flip()+
+  scale_x_discrete(limits=rev(c('Diptera','Lepidoptera','Orthoptera','Araneae','Coleoptera','Isopoda','Blattodea','Siphonaptera','Psocoptera','Hymenoptera')))
+
+## figureo f diet frequency at order-level
+diet.freq<-ggplot(ord.id, aes(reorder(ORDER, samples), samples))+
+  geom_bar(stat='identity', fill='lightgrey', color='black')+
+  coord_flip()+
+  theme_classic(base_size=11)+
+  labs(x='', y='Frequency in\nsamples (%)')+
+  scale_y_continuous(position='right')
+
+
+## multiple metrics
+diet.otu<-ggplot(ord.id, aes(reorder(ORDER, samples),OTU))+
+  geom_bar(stat='identity', fill='lightgrey', color='black')+
+  coord_flip()+
+  theme_classic(base_size=11)+
+  labs(x='', y='OTUs')+
+  scale_y_continuous(position='right')
+
+
+diet.sp<-ggplot(ord.id, aes(reorder(ORDER, samples),n_sp))+
+  geom_bar(stat='identity', fill='lightgrey', color='black')+
+  coord_flip()+
+  theme_classic(base_size=11)+
+  labs(x='', y='Species richness')+
+  scale_y_continuous(position='right')
+
+## should consider whether total species richness or the mean species richness per sample is more important
+
+(diet.freq|diet.otu+theme(axis.text.y=element_blank())|diet.sp+theme(axis.text.y=element_blank()))+
+  plot_annotation(tag_levels = 'a')&
+  theme(plot.tag.position = c(0, 1),plot.tag = element_text(size = 11, hjust = 0, vjust = 0))
+
+ggsave('out/Fig_S3_diet_rank.pdf', width=7.5, height=4)
+```  
+
+
+### Figure S2 - Diet composition by territory  
+Stacked bar chart showing relative frequency of OTUs among fecal samples by arthropod order  
+
+```{r}
+samp.comp<-samps%>%
+  dplyr::select(OTU=`#OTU ID`, everything())%>%
+  left_join(good.id%>%dplyr::select(OTU, ORDER))%>%
+  melt(id.vars=c('OTU','ORDER'), variable.name = 'sample')%>%
+  filter(value > 0)%>%
+  mutate(Territory = case_when(sample %in% c('S2','S3','S7','S12','S20','S21','S22','S52','S53','S54','S55','S56') ~ 'BC',
+                               sample %in% c('S4','S5','S13','S14','S15','S6','S17','S18','S42','S45','S46','S47') ~ 'UCI',
+                               sample %in% c('S11','S19','S29','S30','S35','S57') ~ 'SCR', 
+                               TRUE ~ 'OTHER'))%>%
+  transform(value=as.numeric(value))%>%
+  filter(!is.na(ORDER))%>%
+  group_by(sample, Territory, ORDER)%>%
+  summarize(val=length(unique(OTU)))%>%
+  dcast(sample+Territory~ORDER, fill=0, value.var='val')
+
+## matrix 
+samp.mat<-samp.comp%>%
+  dplyr::select(-sample, -Territory)%>%
+  data.frame()
+
+samp.prop.plot<-samp.comp%>%mutate(Territory = factor(Territory, levels=c('BC','SCR','UCI','OTHER')))%>%
+  mutate_at(vars(Araneae:Siphonaptera), funs(./rowSums(samp.mat)))%>%
+  melt(id.vars=c('sample', 'Territory'))%>%
+  filter(sample != 'Totals')%>%
+  ggplot(aes(sample, value, fill=variable))+
+  geom_bar(stat='identity', position='stack', width=.8)+
+  facet_grid(.~Territory, scales='free_x', space='free_x')+
+  scale_fill_scico_d(palette='tokyo', name='Arthropod order')+
+  labs(x='Sample', y='Proportion of OTUs')+
+  theme(legend.position = 'bottom')
+
+samp.count.plot<-samp.comp%>%mutate(Territory = factor(Territory, levels=c('BC','SCR','UCI','OTHER')))%>%
+  melt(id.vars=c('sample', 'Territory'))%>%
+  filter(sample != 'Totals')%>%
+  ggplot(aes(sample, value))+
+  geom_bar(stat='identity', position='stack', fill='grey', color='grey', width=.8)+
+  facet_grid(.~Territory, scales='free_x', space='free_x')+
+  labs(x='', y='OTUs per sample')+
+  theme(axis.text.x=element_blank())+
+  guides(fill = 'none')
+# berlin, 
+
+plot_grid(samp.count.plot, samp.prop.plot,  nrow=2, rel_heights=c(.7, 1), align='v')
+
+```
+
+### Bird productivity
+
+```{r}
+# area assessed should be the same for each territory - a circle of fixed radius around a nest
+# check responses from Dana
+# multiply % ARCA or m2 ARCA * arthropods / ARCA m2 = prey from ARCA in a given territory
+# done separately for cnaopy and pitfall
+
+## does the veg data sampling imply a circle of fixed radius? do we know the area sampled?
+
+nroc<-read_excel("data/NROC CACW Nestling Dev 2012-2013 for Kailen.xlsx", sheet=1)%>%
+  dplyr::select(Site, Territory, nest=`Nest No`, dev_delay=`Ave 1 HD Diff Develop/Nest`, `Band Date`)%>%
+  mutate(Year=substr(`Band Date`, 1, 4))%>%
+  filter(Year == 2012)%>%
+  mutate(Location = case_when(Site %in%  c('Bommmer Canyon','Bommer Canyon') ~ 'BC',
+                          Site == 'Sand Canyon Reservoir' ~ 'SCR',
+                          Site == 'UC Irvine' ~ 'UCI'),
+         Territory = str_extract(Territory, '[1-9]+'))%>%
+  mutate(Territory = case_when(Location == 'UCI' & Territory == 9 ~ '9', TRUE ~ as.character(Territory)))%>%
+  filter(!is.na(Location), !is.na(dev_delay))%>%
+  mutate(ID = paste0(Location, Territory))
+
+repro<-read_excel("data/NROC 2012-13 Annual Reproductive Data Foraging Study.xlsx", sheet=1)%>%
+  dplyr::select(Territory, Year, egg_date = `1stEggLayJul`, egg_min=MinNoEggs, fledge_min=MinNoFls, egg1=N1Eggs, egg2=N2Eggs, egg3=N3Eggs, egg4=N4Eggs, nests=NoNestAtt)%>%
+  filter(Year == 2012)%>%
+  mutate(Site = str_extract(Territory, '[A-Z]+'), Site=case_when(Site =='BMR' ~ 'BC', Site == 'UC' ~ 'UCI', TRUE ~ Site),
+         Location = case_when(Site %in%  c('Bommmer Canyon','Bommer Canyon') ~ 'BC',
+                          Site == 'Sand Canyon Reservoir' ~ 'SCR',
+                          Site == 'UC Irvine' ~ 'UCI'),
+         Territory = str_extract(Territory, '[1-9]+'))%>%
+  mutate(Territory = case_when(Site == 'UCI' & Territory == '9' ~ '1', TRUE ~ as.character(Territory)))%>%
+  mutate(ID = paste0(Site, Territory))%>%
+  filter(ID %in% c('BC2','BC4','BC5','SCR1','SCR5','UCI1','UCI3','UCI5'))
+
+# clutch size
+csize<-repro%>%
+  dplyr::select(ID,egg1,egg2,egg3,egg4)%>%
+  mutate(egg1 = case_when(ID == 'SCR5' ~ 2, TRUE ~ egg1))%>%
+  melt(id.vars='ID')%>%
+  filter(!is.na(value))%>%
+  group_by(ID)%>%
+  summarize(clutch=mean(value))
+
+## combined reproductive data for territories
+bird<-repro%>%
+  left_join(csize)%>%
+  mutate(ID = paste0(Site,'_', Territory))%>%
+  dplyr::select(Site, ID, everything())%>%
+  dplyr::select(-Territory, -Location, -Year)
+
+write.csv(bird, 'manuscript/data/CAWR_bird_productivity.csv')
+
+mean(bird$fledge_min)
+se(bird$fledge_min)
+
+```
+
+Are bird productivity variables correlated with one another?? 
+
+```{r}
+
+## variables to explore - egg_date, egg_min, fledge_min, clutch
+## use map to run a lm vs egg_date for all variables, tidy output
+str(bird)
+egg.corrs<-bird%>%dplyr::select(-Site)%>%
+  dplyr::select(-ID, -egg1:-egg4)%>%
+  map(~tidy(glm(egg_date~.x, data=bird, family='poisson')))%>%
+  bind_rows(.id='id')%>%
+  filter(term != '(Intercept)')
+egg.corrs
+
+# egg_date is related to egg_min, fledge_min, egg2, and nests
+bird%>%
+  dplyr::select(-egg1:-egg4, -Site)%>%
+  pivot_longer(-ID:-egg_date)%>%
+  left_join(egg.corrs, by=c('name'='id'))%>%
+  transform(name  = factor(name, labels=c('mean clutch size','eggs laid','fledglings','nest efforts')))%>%
+  ggplot(aes(egg_date, value))+
+  geom_point(aes(color=ID, shape=Site), size=2,  alpha=.7)+
+  geom_smooth(data=.%>%filter(name != 'mean clutch size'), method='glm', se=FALSE, color='black')+
+  facet_wrap(~name, scales='free', strip.position='left')+
+  scale_shape_manual(values=c(16,17,15), name='')+
+  scale_color_manual(values=c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a"))+
+  labs(x='First egg date (julian)', y='')+
+  theme(strip.placement = 'outside', strip.background = element_rect(color=NA), strip.text.y = element_text(size=11), strip.switch.pad.wrap = unit(.1, 'mm'))
+
+ggsave("/Users/collnell/Dropbox/Projects/CAWR/manuscript/figures/Fig_S3_birdvars.pdf", width=5, height=3.5)
+
+## moving forward, jsut use the first egg date
+```  
+
+### Vegetation mapping  
+  
+```{r}
+### Veg mapping - read in data
+
+# area of 100m radius circle = 31415.9
+
+# in cases where non natural elements are included, exclude them from the percent cover calculation and total area in projecting
+veg.arth<-read_excel('data/Veg Mapping 2013 Data DK18Oct13.xlsx', sheet=2, skip=1,
+                col_names = c('Location','Territory','Date','Initials','he','he_m2','he_perc_dig','he_perc_calc','terr_m2_dig','he_m2_calc','hab_dig',
+                              'he_perc_hab','Notes','diff'))%>%
+  mutate(hab_area = case_when(is.na(hab_dig) ~ terr_m2_dig, TRUE ~ hab_dig),
+         he_perc = case_when(is.na(he_perc_hab) ~ he_perc_dig, TRUE ~ he_perc_hab))%>%
+  dplyr::select(-Date, -Initials, -Notes, -diff)%>%
+  mutate(Location = case_when(Location == 'Bommer Canyon' ~ 'BC',
+                          Location == 'Sand Canyon Reservoir' ~ 'SCR',
+                          Location == 'UC Irvine' ~ 'UCI'),
+         Territory = str_extract(Territory, '[1-9]+'),
+         he = case_when(he == 'Elderberry' ~ 'SANI',
+                        he == 'Lemonade Berry' ~ 'RHIN',
+                        he == 'Calif. Buckwheat' ~ 'ERFA',
+                        he == 'Artemisia californica' ~ 'ARCA',
+                        he == 'Prickly Pear' ~ 'OPLI',
+                        he == 'Cholla' ~ 'OPLI',
+                        he == 'Perennial (Bunch) Grasses' ~ 'NAGR',
+                        he == 'Annual Grasses' ~ 'EXGR',
+                        he == 'Mustards' ~ 'BRSP',
+                        he == '\"Bare\" ground' ~ 'BARE',
+                        he == 'Laurel Sumac' ~ 'MALA',
+                        he == 'Encelia californica' ~ 'ENCA',
+                        he == 'Bladderpod' ~ 'BLAD',
+                        he == 'Toyon' ~ 'TOYON',
+                        he %in% c('Golf Driving Range/Landscaping',"Agriculture, Golf Range, Paved Rd.","Paved 73 Toll Rd.","Landscaping", 'Developed') ~ 'FAKE',
+                        TRUE ~ he))%>%
+  mutate(ID = paste0(Location, '_', Territory))
+
+#### calculate the percent coverage of each he 
+veg.cover<-veg.arth%>%
+  dcast(ID~he, value.var='he_m2', fun.aggregate=sum)%>%
+  mutate(total.area = ARCA+BARE+BLAD+BRSP+ENCA+ERFA+EXGR+FAKE+MALA+NAGR+OPLI+RHIN+SANI+TOYON)%>%
+  mutate_at(vars(ARCA:TOYON), funs(./total.area))%>%dplyr::select(-total.area)%>%
+  mutate(exotic=BRSP+EXGR, native = ARCA+NAGR+SANI+RHIN+ERFA+OPLI, native.all=ARCA+NAGR+SANI+RHIN+ERFA+OPLI+BLAD+MALA+TOYON) # percent cover of each habitat element
+veg.mat<-veg.cover%>%column_to_rownames('ID')%>%dplyr::select(ARCA:TOYON)
+
+## pca of veg composition
+
+
+# mean and se percent cover of each habitat element overall
+he.cover<-veg.cover%>%summarize_at(vars(ARCA:native.all), funs(mean, se))%>%melt()%>%separate(variable, into=c('he','var'), sep='_')%>%dcast(he~var)
+
+# matrx of focal habitat elements
+he.mat<-veg.cover%>%column_to_rownames('ID')%>%dplyr::select(ARCA, BARE, BRSP, ENCA, ERFA, EXGR, OPLI, RHIN, SANI)#veg.mat # matrix form
+
+## VARIABLES TO MEASURE
+# TOTAL NATIVE COVER, NON-NATIVE COVER, SPECIES WITH VARIANCE, BARE, FAKE
+cover.melt<-veg.cover%>%melt(id.vars='ID', variable.name='var')%>%separate(ID, into=c('Site', 'Territory'), remove=FALSE)
+```
+
+### Arthropod sampling 
+
+#### Distribution of diet across habitat elements & strata   
+OPLI = Opuntia littoralis; RHIN = Rhus integrifolia, SANI = Sambucus nigra; ERFA = Eriogonum fasciculatum; ARCA = Artemisia californica; NAGR = Native grass; EXGR = Exotic grass; BRSP = Brassica sp.; BARE = Bare ground  
+
+```{r}
+## read compiled data - cleaning occurs in CAWR_manuscript.R file
+
+# ARTHROPOD DENSITY ACROSS HE
+### time, ID, block, he,  order
+arth<-read.csv('CAWR_clean_cast.csv')%>%filter(!is.na(Diptera))%>% # drop plants that we not in block
+  mutate(Territory = case_when(Location == 'SCR' & Territory == 2 ~ '5', TRUE ~ as.character(Territory)))%>% # to match to veg data
+  mutate(ID = paste(Location, Territory, sep='_'))%>%dplyr::select(-Location, -Territory)
+arth # 1373 rows
+
+## mean density per territory (across time block)
+# time, ID, he, order
+arth.time.he<-arth%>% 
+  group_by(Year, Block, ID, he, sampling_method)%>% 
+  summarize_at(vars(Acarina:Thysanura), .funs=list(sum)) # mean density per territory x he x time (across blocks)
+arth.time.he# 700 obs
+
+# ID, he, order
+## total biomass across 5 sampling points? should this be a mean?
+arth.he<-arth.time.he%>%
+  group_by(ID, he, sampling_method)%>%
+  summarize_at(vars(Acarina:Thysanura), .funs=list(mean))
+arth.he # 140 obs
+
+## overall biomass density canopy and ground separately
+canopy.he<-arth.time.he%>%filter(sampling_method == 'canopy')%>%ungroup()%>%dplyr::select(-sampling_method)%>%
+  separate(ID, into=c('site','terr'), sep='_') # 70 each
+ground.he<-arth.time.he%>%filter(sampling_method == 'ground')%>%ungroup()%>%dplyr::select(-sampling_method)%>%
+  separate(ID, into=c('site','terr'), sep='_')
+
+```   
+
+#### Examining variation in arthropod composition aong habitat elements  
+
+```{r}
+
+str(canopy.he)
+
+adonis2(canopy.he%>%dplyr::select(-site, -terr, -he)%>%vegdist('bray')~he*terr, data=canopy.he, permiutaitons=1000)
+# just habitat element
+
+adonis2(ground.he%>%dplyr::select(-site, -terr, -he)%>%vegdist('bray')~he*terr, data=ground.he, permiutaitons=1000)
+# he and terr
+
+```
+
+#### Arthropod composition at the territory-level    
+by order betch  
+```{r, fig.width=10, fig.height=4}
+### territory-level estimates of arthropod biomass by order
+arth.veg.terr<-arth.he%>%ungroup()%>%
+  left_join(veg.cover%>%pivot_longer(-ID), by=c('ID', 'he' = 'name'))%>% # join with veg cover
+  mutate(he_perc_fix = ifelse(he %in% c('NAGR','EXGR','OPLI','BRSP'), value/2,value))
+
+## specific to habitat elements
+# multiply biomass by percent cover of each habitat element, then by constant size for each territory
+arth.terr.he<-arth.veg.terr%>%mutate_at(vars(Acarina:Thysanura), funs(.*value*31416)) # per 1m2
+arth.terr.he.fix<-arth.veg.terr%>%mutate_at(vars(Acarina:Thysanura), funs(.*value*31416)) ## adjusted coverage 
+## assume that 1m2 of each he is equal to 3 min vac time - multiple mg by area for overall habitat prey env
+#write.csv(arth.terr, 'CAWR_arth_mg.csv', row.names=FALSE)
+# represents where each order comes form in each habitat
+
+## veg PCA
+pca.veg<-prcomp(veg.cover%>%column_to_rownames('ID')%>%dplyr::select(ARCA:TOYON)%>%decostand('total'))
+summary(pca.veg)
+biplot(pca.veg)
+
+## overall biomass, totalled across territory
+canopy.terr<-arth.terr.he%>%group_by(ID, sampling_method)%>%
+  summarize_at(vars(Acarina:Thysanura), funs(sum))%>%
+  filter(sampling_method=='canopy')%>%ungroup()%>%
+  dplyr::select(-sampling_method)%>%column_to_rownames('ID')
+ground.terr<-arth.terr.he%>%group_by(ID, sampling_method)%>%
+  summarize_at(vars(Acarina:Thysanura), funs(sum))%>%
+  filter(sampling_method=='ground')%>%ungroup()%>%
+  dplyr::select(-sampling_method)%>%column_to_rownames('ID')
+
+
+# calculate arthropod composition axes from PCA
+pca.all.canopy<-prcomp(canopy.terr%>%dplyr::select(-Chilopoda), center=TRUE, scale=TRUE)
+pca.all.ground<-prcomp(ground.terr%>%dplyr::select(-Chilopoda), center=TRUE, scale=TRUE)
+
+pca.prey.canopy.total<-prcomp(canopy.terr%>%dplyr::select(Araneae, Coleoptera, Diptera, Isopoda, Lepidoptera, Orthoptera)%>%decostand('total'))
+pca.prey.ground.total<-prcomp(ground.terr%>%dplyr::select(Araneae, Coleoptera, Diptera, Isopoda, Lepidoptera, Orthoptera)%>%decostand('total'))
+#
+#pca.prey.canopy.total<-prcomp(ground.terr%>%dplyr::select(-Chilopoda)%>%decostand('total')%>%dplyr::select(Araneae, Coleoptera, Diptera, Isopoda, Lepidoptera, Orthoptera))
+#pca.prey.ground.total<-prcomp(canopy.terr%>%dplyr::select(-Chilopoda)%>%decostand('total')%>%dplyr::select(Araneae, Coleoptera, Diptera, Isopoda, Lepidoptera, Orthoptera))
+
+summary(pca.prey.ground)
+summary(pca.prey.canopy)
+
+biplot(pca.prey.ground)
+biplot(pca.prey.canopy)
+
+
+
+## as a proportion of total biomass
+summary(pca.prey.ground.total)
+summary(pca.prey.canopy.total)
+
+biplot(pca.prey.ground.total)
+biplot(pca.prey.canopy.total)
+
+
+## on ground, prey varies mostly in terms of isopoda, other things secondarily in which Araneae & LEp trade-off with Orthoptera and Coleoptera
+## in canopy, 3 way trade-off -  among Lepidoptera and Araneae/Orthoptera (PC1) and , Coleoptera vs Araneae/Orthoptera & LEpidoptera (PC2)
+
+```  
+
+
+### Compile all data
+
+Territory-level metrics 
+```{r}
+## aggregate data at territory (ID) level
+## bird reproductive data
+bird
+
+## vegetation cover
+veg.cover
+
+## territory-level estimates of arthropod biomass 
+canopy.terr
+ground.terr
+
+
+## compile ALL variables at territory-level 
+terr.df<-bird%>%
+  left_join(veg.cover)%>%
+  left_join(canopy.terr%>%rename_all(function(x)paste0(x, '_canopy'))%>%rownames_to_column('ID'))%>%
+  left_join(ground.terr%>%rename_all(function(x)paste0(x, '_ground'))%>%rownames_to_column('ID'))%>%
+  left_join(pca.prey.canopy.total$x%>%as.data.frame()%>%rownames_to_column('ID')%>%dplyr::select(ID, PC1_canopy_prey_prop = PC1, PC2_canopy_prey_prop = PC2))%>% ## extract PCA axes
+  left_join(pca.prey.ground.total$x%>%as.data.frame()%>%rownames_to_column('ID')%>%dplyr::select(ID, PC1_ground_prey_prop = PC1, PC2_ground_prey_prop = PC2))%>%
+  left_join(pca.veg$x%>%as.data.frame()%>%rownames_to_column('ID')%>%dplyr::select(ID, PC1_veg = PC1, PC2_veg = PC2))%>%
+  mutate(prey_canopy = (Araneae_canopy+Coleoptera_canopy+Diptera_canopy+Isopoda_canopy+Lepidoptera_canopy+Orthoptera_canopy)/1000,
+         prey_ground = (Araneae_ground+Coleoptera_ground+Diptera_ground+Isopoda_ground+Lepidoptera_ground+Orthoptera_ground)/1000)
+str(terr.df)
+
+write.csv(terr.df, 'manuscript/CAWR_territory.csv', row.names=FALSE)
+```
+
+
+## ANALYSES  
+
+### Bird productivity and territory-level attributes
+
+```{r}
+
+terr.df<-read.csv('manuscript/CAWR_territory.csv')
+
+egg.terr<-terr.df%>%
+  dplyr::select(egg_date, prey_canopy, prey_ground, ARCA:SANI, exotic:native.all, 
+                contains('Araneae'), contains('Coleoptera'), contains('Diptera'), contains('Isopoda'), contains('Lepidoptera'), contains('Orthoptera'), contains('Hymenoptera'), contains('PC1'))%>%
+  transform(Hymenoptera_ground=log(Hymenoptera_ground), Hymenoptera_canopy=log(Hymenoptera_canopy))%>%
+  map(~tidy(glm(egg_date~.x, data=terr.df, family='poisson')))%>%
+  bind_rows(.id='id')%>%
+  filter(term != '(Intercept)', id != 'egg_date')
+egg.terr
+
+## bird vars - egg min and fledge min
+## veg - percent cover of ARCA, MALA, RHIN, SANI (pos), NAGR, BARE and BRSP, TOYON (neg), 
+
+# arth pos - Coleoptera_ground, Isopoda_ground, Orthoptera_canopy, PC1_ground_all, PC1_canopy_all_prop, PC1_ground_all_prop
+# arth neg - Araneae_ground, Diptera_ground, Isopoda_canopy, Lepidoptera_canopy, PC1_canopy_all, PC1_canopy_prey_prop, PC2_ground_prey, PC2_ground_prey_prop
+
+# egg_date is related to egg_min, fledge_min, egg2, and nests
+terr.df%>%
+  dplyr::select(Site, ID, egg_date, prey_canopy, prey_ground, ARCA:SANI, exotic:native.all, 
+                contains('Araneae'), contains('Coleoptera'), contains('Diptera'), contains('Isopoda'), contains('Lepidoptera'), contains('Orthoptera'), contains('Hymenoptera'),
+                contains('PC1'))%>%
+  pivot_longer(-Site:-egg_date)%>%
+  left_join(egg.terr, by=c('name'='id'))%>%
+  filter(name %in% c('prey_canopy','prey_ground','Hymenoptera_canopy','Hymenoptera_ground', 'PC1_canopy_prey_prop','PC1_ground_prey_prop'))%>%
+  ggplot(aes(value, egg_date))+
+  geom_point(aes(color=ID, shape=Site), size=2,  alpha=.7)+
+  geom_smooth(data=.%>%filter(!(name %in% c('prey_canopy'))), method='glm', se=FALSE, color='black')+
+  facet_wrap(~name, scales='free', strip.position='bottom')+
+  scale_shape_manual(values=c(16,17,15), name='')+
+  scale_color_manual(values=c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a"))+
+  labs(x='First egg date (julian)', y='')+
+  theme(strip.placement = 'outside', strip.background = element_rect(color=NA), strip.text.y = element_text(size=11), strip.switch.pad.wrap = unit(.1, 'mm'))
+
+## keepers = 
+
+## is hymenoptera related to total prey abundance and composition?
+terr.df%>%
+  dplyr::select(contains('Hymenoptera'),  prey_canopy, prey_ground, exotic:native.all, contains('PC1'))%>%
+  map(~tidy(lm(.x~PC1_canopy_prey_prop, data=terr.df)))%>%
+  bind_rows(.id='id')%>%
+  filter(term != '(Intercept)')%>%mutate(p.value=round(p.value, 3))
+
+# canoopy is positively related to hyme_ground,  prey_ground, SANI, Coleoptera_ground, PC1_canopy_all_prop
+# ground = 
+summary(lm(log(prey_ground)~PC1_ground_prey_prop, data=terr.df))#
+summary(lm(log(Hymenoptera_ground)~PC1_ground_prey_prop, data=terr.df)) 
+summary(lm(log(Hymenoptera_canopy)~PC1_canopy_prey_prop, data=terr.df)) # no
+summary(lm(prey_canopy~PC1_canopy_prey_prop, data=terr.df)) # no
+
+# hyme vs prey acnopy
+summary(lm(prey_canopy~log(Hymenoptera_canopy), data=terr.df))
+summary(lm(prey_ground~log(Hymenoptera_ground), data=terr.df))
+str(terr.df)
+
+ggplot(terr.df, aes(PC1_canopy_prey_prop, Hymenoptera_canopy))+geom_point()
+```
+
+#### relating productivity to arthropod densities and composition
+
+```{r}
+
+## is hymenoptera biomass related to prey composition?
+
+### envfit with pca
+#### YES - on the ground, and all.canopy.total
+envfit(pca.prey.canopy.total, canopy.terr%>%dplyr::select(Hymenoptera)%>%transform(Hymenoptera=log(Hymenoptera)))
+envfit(pca.prey.ground.total, ground.terr%>%dplyr::select(Hymenoptera)%>%transform(Hymenoptera=log(Hymenoptera)))# 
+
+env.canopy<-envfit(pca.all.canopy.total, canopy.terr%>%rownames_to_column('ID')%>%
+                     left_join(terr.df)%>%dplyr::select(egg_date, prey_canopy, Hymenoptera, ARCA, BARE, BRSP, NAGR, EXGR, OPLI, ERFA, RHIN, SANI)%>%
+                     transform(Hymenoptera=log(Hymenoptera), prey_canopy=log(prey_canopy)),
+                   permutations=10000)#
+env.canopy
+env.canopy$vectors$arrows%>%data.frame()%>%rownames_to_column('order')
+env.canopy$vectors$r
+
+env.ground<-envfit(pca.all.ground.total, ground.terr%>%rownames_to_column('ID')%>%
+                     left_join(terr.df)%>%
+                     dplyr::select(egg_date, prey_canopy, prey_ground, Hymenoptera, ARCA, BARE, BRSP, NAGR, EXGR, OPLI, ERFA, RHIN, SANI)%>%
+                     transform(Hymenoptera=log(Hymenoptera), prey_canopy=log(prey_canopy)),
+                   permutations=10000)#
+env.ground
+## ARCA, BRSP,  RHIN
+
+### glm with PC1 & PC2
+#### Sort of 
+##### Hymenoptera_canopy and Hymenoptera_ground are correlated
+##### Hymenoptera_canopy is not related to canopy prey composition
+##### Hymenoptera_ground is related to ground composition (prey and all)
+terr.df%>%
+  dplyr::select(Hymenoptera_canopy, Hymenoptera_ground, contains('PC'))%>%
+  map(~tidy(lm(.x~log(Hymenoptera_ground), data=terr.df)))%>%
+  bind_rows(.id = 'response')%>%
+  filter(term != '(Intercept)', p.value <=0.05)
+## pos - Hymenoptera_ground, PC1_ground_prey_prop, PC1_canopy_all_prop
+### neg - PC1_ground_prey
+### because gorund and canopy hymenoptera are correlated - use just ground ??
+
+## Hymenoptera_ground
+### pos with PC1_ground_all, PC1_ground_prey_prop, PC1_ground_all_prop
+### neg = PC1_ground_prey
+
+## is egg date related to hymenoptera biomass and prey biomass?
+### glms with egg date
+#### YES -egg  date is related to hymenoptera in btoh strata, prey biomass on the ground, but not canopy biomass
+tidy(glm(egg_date~log(Hymenoptera_canopy), data=terr.df, family='poisson')) #
+tidy(glm(egg_date~log(Hymenoptera_ground), data=terr.df, family='poisson'))#
+tidy(glm(egg_date~prey_canopy, data=terr.df, family='poisson')) 
+tidy(glm(egg_date~prey_ground, data=terr.df, family='poisson')) # yes
+
+tidy(glm(egg_date~Lepidoptera_canopy, data=terr.df, family='poisson')) # neg - more caterpillars = earlier reproduction
+tidy(glm(egg_date~Coleoptera_ground, data=terr.df, family='poisson')) # pos
+tidy(glm(egg_date~Araneae_ground, data=terr.df, family='poisson')) # neg
+tidy(glm(egg_date~Orthoptera_canopy, data=terr.df, family='poisson')) # pos
+tidy(glm(egg_date~Orthoptera_ground, data=terr.df, family='poisson')) # neg
+tidy(glm(egg_date~Isopoda_ground, data=terr.df, family='poisson')) # pos
+tidy(glm(egg_date~Isopoda_canopy, data=terr.df, family='poisson')) # neg
+
+### glm with PC1 & PC2
+tidy(glm(egg_date~PC1_canopy_prey_prop, data=terr.df, family='poisson')) #
+tidy(glm(egg_date~PC1_ground_prey_prop, data=terr.df, family='poisson'))#
+tidy(glm(egg_date~PC2_canopy_prey_prop, data=terr.df, family='poisson')) # p = .1
+tidy(glm(egg_date~PC2_ground_prey_prop, data=terr.df, family='poisson'))#
+
+tidy(glm(egg_date~log(prey_can), data=terr.df%>%mutate(prey_can=Araneae_canopy+Coleoptera_canopy+Diptera_canopy+Isopoda_canopy+Lepidoptera_canopy+Orthoptera_canopy), family='poisson')) 
+tidy(glm(egg_date~log(prey_ground), data=terr.df, family='poisson')) # yes
+
+# x vars = PC1_canopy_prey_prop, PC1_ground_prey_prop,PC2_canopy_prey_prop (marg), PC2_ground_prey_prop, Hymenoptera_canopy, Hymenoptera_ground, prey_canopy (no), prey_ground
+```  
+
+PCA plot with overlays for:
+egg_date - fill
+Hymenoptera biomass
+prey biomass?
+
+```{r}
+
+screeplot(pca.prey.canopy.total)# 2 or 3
+pca.prey.canopy.total$x
+pca.prey.canopy.total$rotation # PC1 lepidoptera vs orthoptera and araneae, PC2 = coleoptera vs araneae and lepidoptera
+biplot(pca.prey.canopy.total)
+
+screeplot(pca.prey.ground.total)# 2
+pca.prey.ground.total$x
+pca.prey.ground.total$rotation # PC1 = isopoda vs everything else, PC2 = lep and araneae vs orthoptera and coleoptera
+biplot(pca.prey.ground.total)
+
+##PLOT
+pca.canopy.sites<-pca.prey.canopy.total$x%>%data.frame()%>%rownames_to_column('ID')%>%left_join(terr.df)
+pca.canopy.sp<-pca.prey.canopy.total$rotation%>%data.frame()%>%rownames_to_column('order')%>%dplyr::select(order, PC1, PC2)%>%
+  rbind(env.canopy$vectors$arrows%>%data.frame()%>%rownames_to_column('order')%>%filter(order == 'Hymenoptera'))%>%
+  mutate(color=ifelse(order == 'Hymenoptera', .91, 1), group=ifelse(color==1, 'arth', 'other'))
+pca.canopy.sp
+summary(pca.prey.canopy.total)
+
+pca.canopy<-ggplot()+
+  geom_point(data=pca.canopy.sites, aes(PC1, PC2, shape=Site, color=ID, size=log(egg_date)))+
+  geom_segment(data=pca.canopy.sp, aes(x=0, y=0, xend=PC1*color, yend=PC2*color, lty=factor(group)), arrow=arrow(length = unit(.3, 'cm')), color='grey')+
+  geom_text(data=pca.canopy.sp, aes(PC1*color, PC2*color, label=order), hjust=.5, vjust=1.2)+
+  labs(x='PC1 canopy prey (49.8%)', y='PC2 canopy prey (28.6%)')+
+  theme_classic()+theme(panel.border = element_rect(color='black', fill=NA, size=1), plot.background = element_rect(fill=NA), legend.position='none')+
+  xlim(-0.7, 1.1)+ylim(-.6, 1)+
+  scale_shape_manual(values=c(16, 17, 15))+
+  scale_color_manual(values=c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a"))+
+  scale_fill_manual(values=c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a"))+
+  scale_size_continuous(range=c(2,4))
+
+pca.ground.sites<-pca.prey.ground.total$x%>%data.frame()%>%rownames_to_column('ID')%>%left_join(terr.df)
+pca.ground.sp<-pca.prey.ground.total$rotation%>%data.frame()%>%rownames_to_column('order')%>%dplyr::select(order, PC1, PC2)%>%
+  rbind(env.ground$vectors$arrows%>%data.frame()%>%rownames_to_column('order')%>%filter(order %in% c('Hymenoptera','ARCA', 'RHIN')))%>%
+  mutate(color=ifelse(order == 'Hymenoptera', .83, ifelse(order == 'prey_canopy', .57, ifelse(order == 'ARCA', 0.72, ifelse(order == 'BRSP', 0.58, ifelse(order == 'RHIN', 0.94,1))))),
+         group=ifelse(color==1, 'arth', 'other'))
+
+pca.ground<-ggplot()+
+  geom_point(data=pca.ground.sites, aes(PC1, PC2, shape=Site, color=ID, size=log(egg_date)))+
+  geom_segment(data=pca.ground.sp, aes(x=0, y=0, xend=PC1*color, yend=PC2*color, lty=factor(group)), arrow=arrow(length = unit(.3, 'cm')), color='grey')+
+  geom_text(data=pca.ground.sp%>%filter(group!='arth'), aes(PC1*color, PC2*color, label=order), hjust=.5, vjust=1.2)+
+  labs(x='PC1 ground prey (57.0%)', y='PC2 ground prey (28.7%)')+
+  theme_classic(base_size=11)+theme(panel.border = element_rect(color='black', fill=NA, size=1), plot.background = element_rect(fill=NA), legend.position='none')+
+  scale_shape_manual(values=c(16, 17, 15))+
+  xlim(-0.6, 1.1)+ylim(-.66, .6)+
+  scale_color_manual(values=c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a"))+
+  scale_fill_manual(values=c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a"))+
+  scale_size_continuous(range=c(2,4))
+
+plot_grid(pca.canopy, pca.ground, labels=c('canopy','ground'), label_x=.65, label_y=.95)
+
+## pending questions
+## where do orthoptera come from??
+
+```  
+
+Now relating to egg_date, hymenoptera biomass, and prey biomass
+
+```{r}
+# Relationships between egg date, prey biomass, hymenoptera biomass, prey composition
+# and also prey composition, prey biomass, hymenotpera biomass
+
+
+## overlay veg data
+pca.veg.canopy<-ggplot()+
+  geom_point(data=pca.canopy.sites, aes(PC1, PC2, shape=Site), color='grey', size=2.5)+
+  geom_segment(data=pca.canopy.sp, aes(x=0, y=0, xend=PC1*color, yend=PC2*color, color=group), arrow=arrow(length = unit(.3, 'cm')))+
+  geom_text(data=pca.canopy.sp%>%filter(group!='arth'), aes(PC1*color, PC2*color, label=order), hjust=.5, vjust=1.2)+
+  labs(x='PC1 canopy prey (49.8%)', y='PC2 canopy prey (28.6%)')+
+  theme_classic()+theme(panel.border = element_rect(color='black', fill=NA, size=1), plot.background = element_rect(fill=NA), legend.position='none')+
+  xlim(-0.7, 1.1)+ylim(-.6, 1)+
+  scale_shape_manual(values=c(16, 17, 15))+
+  scale_size_continuous(range=c(2,4))+
+  scale_color_manual(values=c('grey','orangered'))
+library(ggrepel)
+
+pca.veg.ground<-ggplot()+
+  geom_point(data=pca.ground.sites, aes(PC1, PC2, shape=Site), color='grey', size=2.5)+
+  geom_segment(data=pca.ground.sp, aes(x=0, y=0, xend=PC1*color, yend=PC2*color,  color=group), arrow=arrow(length = unit(.3, 'cm')))+
+  geom_text_repel(data=pca.ground.sp%>%filter(group!='arth'), aes(PC1*color, PC2*color, label=order), hjust=.5, vjust=1.2)+
+  labs(x='PC1 ground prey (57.0%)', y='PC2 ground prey (28.7%)')+
+  theme_classic(base_size=11)+theme(panel.border = element_rect(color='black', fill=NA, size=1), plot.background = element_rect(fill=NA), legend.position='none')+
+  scale_shape_manual(values=c(16, 17, 15))+
+  scale_size_continuous(range=c(2,4))+
+  scale_color_manual(values=c('grey','orangered'))
+
+plot_grid(pca.veg.canopy, pca.veg.ground, labels=c('canopy','ground'), label_x=.65, label_y=.95)
+
+```
+Now relating to egg_date, hymenoptera biomass, and prey biomass, prey composition axes
+
+PCA of vegetation????
+
+
+#### correlation figures
+
+```{r}
+plot_eggdate_terr<-function(x, xname, y=terr.df$egg_date){
+
+  ggplot(bird, aes(x, y=y))+
+    geom_point(aes(color=ID, shape=Site), size=2.75, alpha=.7)+
+    labs(x= xname, y='')+
+    theme_classic(base_size=11)+
+    theme(legend.position='none')+
+    scale_shape_manual(values=c(16, 17, 15))+
+    scale_color_manual(values=c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a"))+
+    scale_fill_manual(values=c("#85d3e9","#6d9bf9","#00787c","#cf9bcd","#5e3bb1","#f8d756","#f27048","#f4ab4a"))
+}
+
+## relate to egg date:
+## total biomass, total prey, hymenoptera, prey composition, plant composition, 
+### x canopy & strata
+tidy(lm(log(prey_canopy)~log(Hymenoptera_canopy), data=terr.df))
+tidy(lm(prey_ground~log(Hymenoptera_ground), data=terr.df))
+
+# x vars = PC1_canopy_prey_prop, PC1_ground_prey_prop,PC2_canopy_prey_prop (marg), PC2_ground_prey_prop, Hymenoptera_canopy, Hymenoptera_ground, prey_canopy (no), prey_ground
+
+egg.prey.canopy<-plot_eggdate_terr(x=terr.df$prey_canopy, xname='Prey biomass')+labs(y='First egg date\n(julian)')
+egg.prey.ground<-plot_eggdate_terr(x=terr.df$prey_ground, xname='Prey biomass')+labs(y='First egg date\n(julian)')+geom_smooth(method='glm', se=FALSE, color='black')
+
+hyme.prey.canopy<-plot_eggdate_terr(x=terr.df$Hymenoptera_canopy, y=terr.df$prey_canopy, xname='Hymenoptera biomass')+labs(y='Prey biomass')+scale_x_continuous(trans='log1p')+scale_y_continuous(trans='log1p')
+hyme.prey.ground<-plot_eggdate_terr(x=terr.df$Hymenoptera_ground, y=terr.df$prey_ground, xname='Hymenoptera biomass')+labs(y='Prey biomass')+geom_smooth(method='glm', se=FALSE, color='black')+scale_x_continuous(trans='log1p')+scale_y_continuous(trans='log1p')
+
+egg.hyme.canopy<-plot_eggdate_terr(x=terr.df$Hymenoptera_canopy, xname='Hymenoptera biomass')+geom_smooth(method='glm', se=FALSE, color='black')+scale_x_continuous(trans='log1p')
+egg.hyme.ground<-plot_eggdate_terr(x=terr.df$Hymenoptera_ground, xname='Hymenoptera biomass')+geom_smooth(method='glm', se=FALSE, color='black')+scale_x_continuous(trans='log1p')
+
+egg.pc.canopy<-plot_eggdate_terr(x=terr.df$PC1_canopy_prey_prop, xname='PC1 canopy')+geom_smooth(method='glm', se=FALSE, color='black')+labs(y='First egg date\n(julian)')
+egg.pc.ground<-plot_eggdate_terr(x=terr.df$PC1_ground_prey_prop, xname='PC1 ground')+geom_smooth(method='glm', se=FALSE, color='black')+labs(y='First egg date\n(julian)')
+egg.pc2.canopy<-plot_eggdate_terr(x=terr.df$PC2_canopy_prey_prop, xname='PC2 canopy')+geom_smooth(method='glm', se=FALSE, color='black', lty='dashed')+labs(y='First egg date\n(julian)')
+egg.pc2.ground<-plot_eggdate_terr(x=terr.df$PC2_ground_prey_prop, xname='PC2 ground')+geom_smooth(method='glm', se=FALSE, color='black')+labs(y='First egg date\n(julian)')
+
+### PC loadings
+pc1.canopy.load<-pca.canopy.sp%>%filter(group=='arth')%>%
+  ggplot(aes(order, PC1))+
+  geom_point(size=2.5)+
+  geom_linerange(aes(ymin=0, ymax=PC1), size=1)+
+  geom_hline(yintercept=0, lty='dashed', size=1, color='grey')+
+  theme_classic(base_size=11)+
+  coord_flip()+labs(y='PC1 canopy', x='')
+
+pc2.canopy.load<-pca.canopy.sp%>%filter(group=='arth')%>%
+  ggplot(aes(order, PC2))+
+  geom_point(size=2.5)+
+  geom_linerange(aes(ymin=0, ymax=PC2), size=1)+
+  geom_hline(yintercept=0, lty='dashed', size=1, color='grey')+
+  theme_classic(base_size=11)+
+  coord_flip()+labs(y='PC2 canopy', x='')+theme(axis.text.y=element_blank())
+
+pc1.ground.load<-pca.ground.sp%>%filter(group=='arth')%>%
+  ggplot(aes(order, PC1))+
+  geom_point(size=2.5)+
+  geom_linerange(aes(ymin=0, ymax=PC1), size=1)+
+  geom_hline(yintercept=0, lty='dashed', size=1, color='grey')+
+  theme_classic(base_size=11)+
+  coord_flip()+labs(y='PC1 ground', x='')+theme(axis.text.y=element_blank())
+
+pc2.ground.load<-pca.ground.sp%>%filter(group=='arth')%>%
+  ggplot(aes(order, PC2))+
+  geom_point(size=2.5)+
+  geom_linerange(aes(ymin=0, ymax=PC2), size=1)+
+  geom_hline(yintercept=0, lty='dashed', size=1, color='grey')+
+  theme_classic(base_size=11)+
+  coord_flip()+labs(y='PC2 ground', x='')+theme(axis.text.y=element_blank())
+
+## correlations with egg date and biomass variables
+plot_grid(egg.prey.canopy, egg.hyme.canopy, hyme.prey.canopy, egg.prey.ground, egg.hyme.ground, hyme.prey.ground,
+          nrow=2, align='vh', labels=c('canopy','','','ground','',''), label_x = .2)
+## but also want prey and hyme biomass against each other??
+
+##cnaopy pcs and egg date
+plot_grid(pc1.canopy.load, pc2.canopy.load, egg.pc.canopy, egg.pc2.canopy,pc1.ground.load, pc2.ground.load,egg.pc.ground,egg.pc2.ground,ncol=2, align='vh', labels=c('canopy','','','','ground','','',''))
+
+ggsave('figs/FigS7_biomass_corrs.pdf', width=6.5, height=4)
+
+
+```
+
+```{r}
+
+## something is happening with ground in SCR sites
+## then we also want between prey composition and prey biomass, hymenoptera biomass
+terr.df%>%
+  dplyr::select(prey_canopy, prey_ground, contains('prop'))%>%
+  map(~tidy(lm(.x~prey_canopy, data=terr.df)))%>%
+  bind_rows(.id = 'response')%>%
+  filter(term != '(Intercept)', p.value <=0.1)
+## prey canopy 
+## prey ground is related to PC1_gorund_prey_prop
+
+prey.pc.canopy<-plot_eggdate_terr(x=terr.df$PC1_canopy_prey_prop, y=terr.df$prey_canopy, xname='PC1 canopy')+geom_smooth(method='glm', se=FALSE, color='black')+labs(y='Prey biomass')
+prey.pc.ground<-plot_eggdate_terr(x=terr.df$PC1_ground_prey_prop, y=terr.df$prey_ground, xname='PC1 ground')+geom_smooth(method='glm', se=FALSE, color='black')+labs(y='Prey biomass')
+prey.pc2.canopy<-plot_eggdate_terr(x=terr.df$PC2_canopy_prey_prop, y=terr.df$prey_canopy, xname='PC2 prey')+labs(y='Prey biomass')
+prey.pc2.ground<-plot_eggdate_terr(x=terr.df$PC2_ground_prey_prop, y=terr.df$prey_ground, xname='PC2 prey')+labs(y='Prey biomass')
+
+hyme.pc.canopy<-plot_eggdate_terr(x=terr.df$PC1_canopy_prey_prop, y=terr.df$Hymenoptera_canopy, xname='PC1 canopy')+geom_smooth(method='glm', se=FALSE, color='black')+
+  labs(y='Hymenoptera\nbiomass')+scale_y_continuous(trans='log1p')
+hyme.pc.ground<-plot_eggdate_terr(x=terr.df$PC1_ground_prey_prop, y=terr.df$Hymenoptera_ground, xname='PC1 ground')+geom_smooth(method='glm', se=FALSE, color='black')+
+  labs(y='Hymenoptera\nbiomass')+scale_y_continuous(trans='log1p')
+hyme.pc2.canopy<-plot_eggdate_terr(x=terr.df$PC2_canopy_prey_prop, y=terr.df$Hymenoptera_canopy, xname='PC2 canopy')+labs(y='Hymenoptera\nbiomass')+scale_y_continuous(trans='log1p')
+hyme.pc2.ground<-plot_eggdate_terr(x=terr.df$PC2_ground_prey_prop, y=terr.df$Hymenoptera_ground, xname='PC2 ground')+labs(y='Hymenoptera\nbiomass')+scale_y_continuous(trans='log1p')
+
+
+plot_grid(prey.pc.canopy,hyme.pc.canopy,
+          prey.pc.ground,hyme.pc.ground)
+
+
+#ggsave("/Users/collnell/Dropbox/Projects/CAWR/manuscript/figures/Fig_hv.pdf", width=10.5, height=4)
+
+terr.df%>%
+  dplyr::select(Hymenoptera_canopy, Hymenoptera_ground, contains('prop'))%>%
+  map(~tidy(lm(.x~log(Hymenoptera_ground), data=terr.df)))%>%
+  bind_rows(.id = 'response')%>%
+  filter(term != '(Intercept)', p.value <=0.05)
+# Hyme_cnaopy relates to PC!_cnaopy_all_prop
+
+plot_grid(pc1.canopy.load, pc2.canopy.load,pc1.ground.load, pc2.ground.load,
+          egg.pc.canopy,egg.pc2.canopy,egg.pc.ground,egg.pc2.ground,
+          prey.pc.canopy, prey.pc2.canopy, prey.pc.ground, prey.pc2.ground,
+          hyme.pc.canopy, hyme.pc2.canopy,hyme.pc.ground, hyme.pc2.ground,
+          
+          nrow=4, align='vh')
+
+ggsave('figs/FigS6_PC_corrs.pdf', width=9, height=7)
+```
+
+## permanova - does composition differ among habitat elements and territories??
+
+```{r}
+library(caret)
+## drop orders with near zero variance
+can.mat<-canopy.he%>%dplyr::select(Acarina:Thysanura)
+#can.mat[,nearZeroVar(canopy.he.df%>%dplyr::select(Acarina:Thysanura))] # chilopoda, Dermaptera, Opiliones
+
+## distance matrices for all arthropods, canopy arthropods
+all.dist.can<-canopy.he%>%dplyr::select(Acarina:Thysanura)%>%vegdist('bray')
+all.dist.gro<-ground.he%>%dplyr::select(Acarina:Thysanura)%>%vegdist('bray')
+## jsut prey orders
+prey.dist.can<-canopy.he%>%dplyr::select(Araneae, Diptera, Coleoptera, Orthoptera, Lepidoptera, Isopoda)%>%vegdist('bray')
+prey.dist.gro<-ground.he%>%dplyr::select(Araneae, Diptera, Coleoptera, Orthoptera, Lepidoptera, Isopoda)%>%vegdist('bray')
+
+
+## test for differences in composition among habitat elements, location, he*location
+adonis(prey.dist.can~Location/Territory+he, data=canopy.he) # differs with habitat element but not territory
+adonis(prey.dist.gro~Location/Territory+he, data=ground.he) # differs among territories and habitat elements
+
+adonis(all.dist.can~Location/Territory+he, data=canopy.he) # differs with habitat element but not territory
+adonis(all.dist.gro~Location/Territory+he, data=ground.he) # differs among territories and habitat elements
+
+## arthropod composition in canopy differs among habitat elements, on ground by habitat element and territory
+
+```
+```{r}
+## PCA of composition among habitat elements
+
+## matrix of arthropod density 
+## territory and habitat element specific estiamtes of density
+canopy.he.mat<-canopy.he%>%
+  mutate(ID_he=paste0(ID,'_', he))%>%
+  column_to_rownames('ID_he')%>%dplyr::select(Acarina:Thysanura)%>%dplyr::select(-Chilopoda, -Dermaptera, -Opiliones)
+
+canopy.he.pca<-prcomp(scale(canopy.he.mat))
+canopy.he.pca.df<-canopy.he.pca$x%>%data.frame()%>%rownames_to_column('ID_he')%>%separate(ID_he, into=c('Site','Territory','he'), sep='_')
+canopy.he.pca.ord<-canopy.he.pca$rotation%>%data.frame()%>%rownames_to_column('order')
+
+ggplot()+
+  geom_point(data=canopy.he.pca.df, aes(PC1, PC2, color=he))+
+  geom_text(data=canopy.he.pca.ord, aes(PC1, PC2, label=order))
+
+```
+## pca with time
+
+```{r}
+can.time<-arth.time.he%>%filter(sampling_method=='canopy')%>%mutate(ID_time=paste0(ID, '_', he, '_', time_block))%>%column_to_rownames('ID_time')%>%dplyr::select(Acarina:Thysanura)
+can.time
+
+can.time[which(rowSums(can.time)==0),] ## 16 rows
+
+```
+
+### Diet vs prey 
+Relating arthropod diet to territory-level estimates of arthropod biomass  
+
+
+ 
+#### Figure 1 - Show 3 panels with diet, density per habitat element, and total biomass per territory
+
+```{r}
+
+## prey availabiltiy - total biomass in each territory
+arth.melt<-read.csv('CAWR_arth_mg.csv')%>%
+  melt(id.vars=c('ID','sampling_method','he'))
+
+## total across all timepoints - by order, strata, and territory
+veg.ord<-arth.melt%>%
+  group_by(ID, sampling_method, variable)%>%
+  summarize(mg_sum=sum(value), mg_mean=mean(value), mg_se=se(value))%>%
+  separate(ID, into=c('site','terr'), '_', remove=FALSE)%>%
+  arrange(mg_mean)
+
+# overall mean biomass for each order
+tot.veg<-arth.melt%>%group_by(sampling_method, variable)%>%summarize(mg_mean=mean(value), mg_se=se(value))
+
+## extract order of biomass in canopy to order figure
+ar.can<-tot.veg%>%filter(sampling_method=='canopy')%>%arrange(desc(mg_mean))%>%filter(!variable %in% ord.id$ORDER)
+veg.plot<-veg.ord%>%dplyr::select(-terr, -mg_sum)
+
+## add blank rows for orders not in both datasets to be able to combine plots 
+order.order<-c('Diptera','Lepidoptera','Orthoptera','Araneae','Coleoptera','Isopoda',
+               'Hymenoptera','Heteroptera','Sternorrhyncha','Auchenorrhyncha','Acarina','Neuroptera','Dermaptera','Thysanura','Psocoptera','Opiliones',
+               'Entomobryomorpha','Thysanoptera','Chilopoda','Blattodea','Siphonaptera')
+
+## DIET FREQUENCY PLOT
+sdiet.freq<-ggplot(ordy, aes(reorder(ORDER, samples), samples))+
+  geom_bar(stat='identity', fill='lightgrey',color=NA, width=.8)+
+  coord_flip()+
+  theme_classic(base_size=10)+
+  labs(x='', y='Frequency in samples (%)')+
+  scale_x_discrete(limits=rev(order.order))+
+  facet_grid(~'diet')
+
+## combine with environemntal data
+plot.env<-ggplot(tot.veg%>%mutate(g_mean=mg_mean/1000, g_se=mg_se/1000), aes(variable, g_mean))+
+  geom_bar(stat='identity', fill='lightgrey', color=NA, width=.8)+
+  facet_grid(~sampling_method, scales='free_x')+
+  theme_classic(base_size=10)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  coord_flip()+
+  labs(y='Biomass (g)', x='')+
+  scale_x_discrete(limits=rev(order.order))+
+  scale_y_continuous(trans='log1p', breaks=c(0,10, 100,1000))+
+  geom_point(data=veg.ord%>%mutate(g_mean = mg_mean/1000), aes(shape=site, variable, g_mean, color=ID),  size=1, position=position_dodge(.4), alpha=.7)+
+  geom_errorbar(aes(ymin=g_mean-g_se, ymax=g_mean+g_se), width=.4)+
+  scale_shape_manual(values=c(16,17,15), name='')+
+  scale_color_manual(values=c("#6d9bf9","#85d3e9","#00787c","#cf9bcd","#5e3bb1","#f27048","#f8d756","#f4ab4a"))
+
+plot_grid(sdiet.freq, plot.env, rel_widths=c(.8, 1.2), align='v')
+
+ggsave('manuscript/Fig_1_prey.pdf', width=8, height=4)
+
+```  
+
+#### Fig. Mean biomass of arthropod prey orders across focal habitat elements  
+
+
+#### Figure Arthropod composition among territories  
+
+
+```{r}
+## each row is a habitat element - info on arthropod mg and percent cover in each territory
+arth.up<-read.csv('CAWR_arth_mg.csv')%>%mutate(ID = paste0(Location, '.', Territory))
+str(arth.up)
+
+canopy.df<-arth.up%>%filter(sampling_method=='canopy')
+canopy.mg<-canopy.df%>%dplyr::select()
+
+```
+
+
+
+#### Ordination of arthropod composition among habitat elements  
+
+```{r}
+
+## make nmds plots of composition for each
+can.mds<-prey.dist.can%>%metaMDS()#0.166
+
+# extract data for plotting
+can.plot<-can.mds%>%
+  scores()%>%data.frame()%>%
+  mutate(he=prey.mat.can$he, Location =prey.mat.can$Location, Territory = prey.mat.can$Territory, sampling_method='canopy', ID = paste0(Location,'.', Territory))%>%
+  left_join(prey.mat.can)%>%mutate(prey_mg = rowSums(prey.mat.can%>%dplyr::select(Araneae, Coleoptera, Diptera, Lepidoptera, Orthoptera)))
+
+gr.mds<-prey.dist.gr%>%metaMDS()# 0.149
+gr.plot<-gr.mds%>%scores()%>%data.frame()%>%
+  mutate(he=prey.mat.gr$he, Location =prey.mat.gr$Location, Territory = prey.mat.gr$Territory, sampling_method='ground', ID = paste0(Location,'.', Territory))%>%
+  left_join(prey.mat.gr)%>%mutate(prey_mg = rowSums(prey.mat.gr%>%dplyr::select(Araneae, Coleoptera, Diptera, Lepidoptera, Orthoptera)))
+
+can.env<-envfit(can.mds, can.plot%>%dplyr::select(prey_mg, Location, he, Hymenoptera, Isopoda, Araneae, Coleoptera, Diptera, Lepidoptera, Orthoptera))
+# cnaopy = mg hyme. aran, coleoptera, diptera, lep, orth
+can.env
+
+gr.env<-envfit(gr.mds, gr.plot%>%dplyr::select(prey_mg, Location, he, Hymenoptera, Isopoda, Araneae, Coleoptera, Diptera, Lepidoptera, Orthoptera))
+gr.env$vectors$pvals
+## on ground - prey_mg, hyme, isopoda, coleoptera, leps
+can.vec<-can.env%>%scores('vectors')%>%data.frame()%>%
+  rownames_to_column('name')%>%
+  mutate(r2 = can.env$vectors$r, p = can.env$vectors$pvals)%>%
+  filter(p <=0.05)
+
+gr.vec<-gr.env%>%scores('vectors')%>%data.frame()%>%
+  rownames_to_column('name')%>%
+  mutate(r2 = gr.env$vectors$r, p = gr.env$vectors$pvals)%>%
+  filter(p <=0.05)
+gr.vec
+can.env$factors$pvals
+fac.df<-can.env$factors$centroids%>%data.frame()%>%rownames_to_column('he')%>%
+  filter(!(he %in% c('LocationBC','LocationSCR','LocationUCI')))%>%mutate(he=gsub('he', '', he))
+fac.df
+
+can.fac<-can.env$factors$centroids%>%data.frame()%>%rownames_to_column('he')%>%
+  filter(!(he %in% c('LocationBC','LocationSCR','LocationUCI')))%>%mutate(he=gsub('he', '', he))
+gr.fac<-gr.env$factors$centroids%>%data.frame()%>%rownames_to_column('he')%>%
+  filter(!(he %in% c('LocationBC','LocationSCR','LocationUCI')))%>%mutate(he=gsub('he', '', he))
+
+nmds.canopy<-ggplot(can.plot, aes(NMDS1, NMDS2))+
+  geom_point(size=2, aes(color=he), alpha=.4)+
+  geom_text(data=can.vec%>%filter(name != 'prey_mg'), aes(NMDS1*r2, NMDS2*r2, label=name), color='black')+
+  geom_text(data=can.fac, aes(NMDS1, NMDS2, label=he, color=he))+
+  geom_segment(data=can.vec%>%filter(name != 'prey_mg'), aes(x=0, y=0, xend=NMDS1*r2, yend=NMDS2*r2))+
+  theme(legend.position='none')
+  
+nmds.ground<-ggplot(gr.plot, aes(NMDS1, NMDS2))+
+  geom_point(size=2, aes(color=he), alpha=.4)+
+  geom_text(data=gr.vec%>%filter(name != 'prey_mg'), aes(NMDS1*r2, NMDS2*r2, label=name), color='black')+
+  geom_text(data=gr.fac, aes(NMDS1, NMDS2, label=he, color=he))+
+  geom_segment(data=gr.vec%>%filter(name != 'prey_mg'), aes(x=0, y=0, xend=NMDS1*r2, yend=NMDS2*r2))+
+  theme(legend.position='none')
+  
+plot_grid(nmds.canopy, nmds.ground, nrow=1, labels=c('a) canopy','b) ground'), align='h', label_x=.05,  rel_widths=c(1,1))
+
+```
+
+
+## TABLES  
+
+#### Table S1 - Taxonomy of prey arthropods 
+Number of OTUs, BOLD similarity, and the frequency in samples of prey taxa identified from DNA barcoding of fecal samples 
+
+```{r}
+
+
+# reads per otu, ID, sample
+id.dat<-otu.melt%>%
+  left_join(good.id, by=c('#OTU ID'='OTU'))%>%
+  filter(!is.na(FINAL_ID))%>%
+  group_by(FINAL_ID)%>%
+  summarize(similarity = round(mean(`BOLD PERCENT`, na.rm=TRUE),2),  # mean percent similarity to BOLD
+            samples=round(100*(length(unique(sample))/28),2),  # proportion of samples detected in
+            RRA = round(100*(sum(value)/69475),2)) # releative read abudnace (proportion)
+
+# make a table of outcomes
+tables3<-good.id%>%
+  group_by(CLASS, ORDER, FAMILY, GENUS, SPECIES, FINAL_ID)%>%
+  summarize(OTU = length(unique(OTU)))%>%
+  arrange(CLASS, ORDER, FAMILY, GENUS, SPECIES)%>%
+  left_join(id.dat)#%>%
+
+#write.csv(tables3, 'manuscript/Table_S3.csv', row.names=FALSE, na='')
+
+``` 
