@@ -60,7 +60,7 @@ ids<-read_excel('data/cawr_otu_ids.xlsx', sheet=3)%>%
                            FINAL_ID == FAMILY ~ 'FAMILY',
                            FINAL_ID == ORDER ~ 'ORDER',
                            TRUE ~ LEVEL))%>%
-  mutate(ORDER = case_when(is.na(ORDER) ~ FINAL_ID, TRUE ~ ORDER), 
+  mutate(ORDER = case_when(is.na(ORDER) ~ FINAL_ID, ORDER %in% c('Isopoda','Blattodea') ~ 'Blattodea', TRUE ~ ORDER), # Isopods are now within Blattodea
          CLASS = case_when(ORDER %in% c('Araneae') ~ 'Arachnida',
                            ORDER == 'Isopoda' ~ 'Malacostraca', 
                            TRUE ~ 'Insecta'))%>%
@@ -84,6 +84,7 @@ otu.ct<-otu.melt%>%group_by(sample)%>%summarize(otus=length(unique(`#OTU ID`)))
 Order frequency, OTU richness, species richness from fecal samples  
 ```{r, eval=FALSE}
 ## what percent of each diet sample (otus) are 'diet'?
+prey<-c('Araneae','Coleoptera','Blattodea','Diptera','Lepidoptera','Orthoptera')
 
 ## total by order
 id.ord<-otu.melt%>%
@@ -103,7 +104,7 @@ otu.l<-otu.melt%>%
 
 ## what percent of each diet sample (otus) are 'diet'?
 diet.perc<-otu.l%>%
-  mutate(type=ifelse(ORDER %in% c('Araneae','Coleoptera','Blattodea','Diptera','Isopoda','Lepidoptera','Orthoptera'), 'prey', 'not'))%>%
+  mutate(type=ifelse(ORDER %in% c('Araneae','Coleoptera','Blattodea','Diptera','Lepidoptera','Orthoptera'), 'prey', 'not'))%>%
   group_by(sample, type)%>%
   summarize(n=sum(otus))%>%
   dcast(sample~type, fill=0)%>%
@@ -123,17 +124,23 @@ otu.sample.rich<-otu.l%>%
 # breakdown by orders, combine all order-level calcs
 ord.id<-good.id%>%
   group_by(CLASS, ORDER)%>%
-  summarize(OTU = length(unique(OTU)), n_fam= length(unique(na.omit(FAMILY))), n_sp = length(unique(na.omit(SPECIES))))%>%
+  summarize(OTU = length(unique(OTU)), n_fam= length(unique(na.omit(FAMILY))))%>%
   arrange(CLASS, ORDER)%>%
   left_join(id.ord)%>%
-  left_join(otu.sample.rich)
+  left_join(otu.sample.rich)%>%
+  left_join(good.id%>%
+    filter(LEVEL %in% c('GENUS','SPECIES'))%>%
+    mutate(ID_SP = paste(GENUS, SPECIES), ID_SP = case_when(is.na(SPECIES) ~ paste(GENUS, 'sp.')))%>%
+    group_by(CLASS, ORDER)%>%
+    summarize(n_sp = length(unique(na.omit(FINAL_ID)))))
+  
   
 ord.id%>%ungroup()%>%dplyr::select(ORDER, samples, OTU, RRA, id_mean, otu_n_mean)%>%melt(id.vars='ORDER')%>%
   ggplot(aes(ORDER, value))+
   geom_bar(stat='identity')+
   facet_wrap(~variable, scales='free_x')+
   coord_flip()+
-  scale_x_discrete(limits=rev(c('Diptera','Lepidoptera','Orthoptera','Araneae','Coleoptera','Isopoda','Blattodea','Siphonaptera','Psocoptera','Hymenoptera')))
+  scale_x_discrete(limits=rev(c('Diptera','Lepidoptera','Orthoptera','Araneae','Coleoptera','Blattodea','Siphonaptera','Psocoptera','Hymenoptera')))
 
 ## figureo f diet frequency at order-level
 diet.freq<-ggplot(ord.id, aes(reorder(ORDER, samples), samples))+
@@ -167,6 +174,7 @@ diet.sp<-ggplot(ord.id, aes(reorder(ORDER, samples),n_sp))+
   theme(plot.tag.position = c(0, 1),plot.tag = element_text(size = 11, hjust = 0, vjust = 0))
 
 ggsave('out/Fig_S3_diet_rank.pdf', width=7.5, height=4)
+ggsave('out/Fig_S3_diet_rank.png', width=7.5, height=4)
 ```  
 
 
@@ -218,6 +226,9 @@ samp.count.plot<-samp.comp%>%mutate(Territory = factor(Territory, levels=c('BC',
 
 plot_grid(samp.count.plot, samp.prop.plot,  nrow=2, rel_heights=c(.7, 1), align='v')
 
+ggsave('out/Fig_S2_diet_conposition.pdf', width=7.5, height=6)
+ggsave('out/Fig_S2_diet_conposition.png', width=7.5, height=6)
+
 ```
 
 ### Bird productivity
@@ -231,7 +242,7 @@ plot_grid(samp.count.plot, samp.prop.plot,  nrow=2, rel_heights=c(.7, 1), align=
 ## does the veg data sampling imply a circle of fixed radius? do we know the area sampled?
 
 nroc<-read_excel("data/NROC CACW Nestling Dev 2012-2013 for Kailen.xlsx", sheet=1)%>%
-  dplyr::select(Site, Territory, nest=`Nest No`, dev_delay=`Ave 1 HD Diff Develop/Nest`, `Band Date`)%>%
+  dplyr::select(Site =  Site...1, Territory, nest=`Nest No`, dev_delay=`Ave 1 HD Diff Develop/Nest`, `Band Date`)%>%
   mutate(Year=substr(`Band Date`, 1, 4))%>%
   filter(Year == 2012)%>%
   mutate(Location = case_when(Site %in%  c('Bommmer Canyon','Bommer Canyon') ~ 'BC',
@@ -270,10 +281,10 @@ bird<-repro%>%
   dplyr::select(Site, ID, everything())%>%
   dplyr::select(-Territory, -Location, -Year)
 
-write.csv(bird, 'manuscript/data/CAWR_bird_productivity.csv')
+write.csv(bird, 'processed/CAWR_bird_productivity.csv')
 
-mean(bird$fledge_min)
-se(bird$fledge_min)
+#mean(bird$fledge_min)
+#se(bird$fledge_min)
 
 ```
 
@@ -283,18 +294,16 @@ Are bird productivity variables correlated with one another??
 
 ## variables to explore - egg_date, egg_min, fledge_min, clutch
 ## use map to run a lm vs egg_date for all variables, tidy output
-str(bird)
 egg.corrs<-bird%>%dplyr::select(-Site)%>%
   dplyr::select(-ID, -egg1:-egg4)%>%
   map(~tidy(glm(egg_date~.x, data=bird, family='poisson')))%>%
-  bind_rows(.id='id')%>%
-  filter(term != '(Intercept)')
-egg.corrs
+  bind_rows(.id='id')
+egg.corrs%>%write_csv('processed/Table_LM_eggdate.csv')
 
 # egg_date is related to egg_min, fledge_min, egg2, and nests
 bird%>%
-  dplyr::select(-egg1:-egg4, -Site)%>%
-  pivot_longer(-ID:-egg_date)%>%
+  dplyr::select(-egg1:-egg4)%>%
+  pivot_longer(-Site:-egg_date)%>%
   left_join(egg.corrs, by=c('name'='id'))%>%
   transform(name  = factor(name, labels=c('mean clutch size','eggs laid','fledglings','nest efforts')))%>%
   ggplot(aes(egg_date, value))+
@@ -306,7 +315,8 @@ bird%>%
   labs(x='First egg date (julian)', y='')+
   theme(strip.placement = 'outside', strip.background = element_rect(color=NA), strip.text.y = element_text(size=11), strip.switch.pad.wrap = unit(.1, 'mm'))
 
-ggsave("/Users/collnell/Dropbox/Projects/CAWR/manuscript/figures/Fig_S3_birdvars.pdf", width=5, height=3.5)
+ggsave("out/Fig_S1_LM_birvars.pdf", width=5, height=3.5)
+# ggsave("out/Fig_S1_LM_birvars.png", width=5, height=3.5)
 
 ## moving forward, jsut use the first egg date
 ```  
@@ -316,7 +326,7 @@ ggsave("/Users/collnell/Dropbox/Projects/CAWR/manuscript/figures/Fig_S3_birdvars
 ```{r}
 ### Veg mapping - read in data
 
-# area of 100m radius circle = 31415.9
+# area of 100m radius circle = 31415.9 m2
 
 # in cases where non natural elements are included, exclude them from the percent cover calculation and total area in projecting
 veg.arth<-read_excel('data/Veg Mapping 2013 Data DK18Oct13.xlsx', sheet=2, skip=1,
@@ -379,9 +389,9 @@ OPLI = Opuntia littoralis; RHIN = Rhus integrifolia, SANI = Sambucus nigra; ERFA
 
 # ARTHROPOD DENSITY ACROSS HE
 ### time, ID, block, he,  order
-arth<-read.csv('CAWR_clean_cast.csv')%>%filter(!is.na(Diptera))%>% # drop plants that we not in block
+arth<-read.csv('processed/CAWR_clean_cast.csv')%>%filter(!is.na(Diptera))%>% # drop plants that we not in block
   mutate(Territory = case_when(Location == 'SCR' & Territory == 2 ~ '5', TRUE ~ as.character(Territory)))%>% # to match to veg data
-  mutate(ID = paste(Location, Territory, sep='_'))%>%dplyr::select(-Location, -Territory)
+  mutate(ID = paste(Location, Territory, sep='_'))%>%dplyr::select(-Location, -Territory,Blattodea = Isopoda)
 arth # 1373 rows
 
 ## mean density per territory (across time block)
@@ -399,23 +409,22 @@ arth.he<-arth.time.he%>%
 arth.he # 140 obs
 
 ## overall biomass density canopy and ground separately
-canopy.he<-arth.time.he%>%filter(sampling_method == 'canopy')%>%ungroup()%>%dplyr::select(-sampling_method)%>%
-  separate(ID, into=c('site','terr'), sep='_') # 70 each
-ground.he<-arth.time.he%>%filter(sampling_method == 'ground')%>%ungroup()%>%dplyr::select(-sampling_method)%>%
-  separate(ID, into=c('site','terr'), sep='_')
+canopy.he<-arth.time.he%>%filter(sampling_method == 'canopy')%>%ungroup()%>%dplyr::select(ID, he, Araneae, Coleoptera, Diptera, Blattodea, Lepidoptera, Orthoptera)%>%
+  separate(ID, into=c('site','terr'), sep='_')%>%mutate(total=Araneae+Coleoptera+Diptera+Blattodea+Lepidoptera+Orthoptera)%>%filter(total!=0)%>%dplyr::select(-total)
+
+
+ground.he<-arth.time.he%>%filter(sampling_method == 'ground')%>%ungroup()%>%dplyr::select(ID, he, Araneae, Coleoptera, Diptera, Blattodea, Lepidoptera, Orthoptera)%>%
+  separate(ID, into=c('site','terr'), sep='_')%>%mutate(total=Araneae+Coleoptera+Diptera+Blattodea+Lepidoptera+Orthoptera)%>%filter(total!=0)%>%dplyr::select(-total)
 
 ```   
 
 #### Examining variation in arthropod composition aong habitat elements  
 
 ```{r}
-
-str(canopy.he)
-
-adonis2(canopy.he%>%dplyr::select(-site, -terr, -he)%>%vegdist('bray')~he*terr, data=canopy.he, permiutaitons=1000)
+adonis2(canopy.he%>%dplyr::select(-site:-he)%>%vegdist(method='bray')~he*site, data=canopy.he, permiutaitons=10000)
 # just habitat element
 
-adonis2(ground.he%>%dplyr::select(-site, -terr, -he)%>%vegdist('bray')~he*terr, data=ground.he, permiutaitons=1000)
+adonis2(ground.he%>%dplyr::select(-site:-he)%>%vegdist(method='bray')~he(site, data=ground.he, permiutaitons=10000)
 # he and terr
 
 ```
