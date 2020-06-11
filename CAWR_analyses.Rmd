@@ -60,7 +60,7 @@ ids<-read_excel('data/cawr_otu_ids.xlsx', sheet=3)%>%
                            FINAL_ID == FAMILY ~ 'FAMILY',
                            FINAL_ID == ORDER ~ 'ORDER',
                            TRUE ~ LEVEL))%>%
-  mutate(ORDER = case_when(is.na(ORDER) ~ FINAL_ID, ORDER %in% c('Isopoda','Blattodea') ~ 'Blattodea', TRUE ~ ORDER), # Isopods are now within Blattodea
+  mutate(ORDER = case_when(is.na(ORDER) ~ FINAL_ID, TRUE ~ ORDER), # Isopods are now within Blattodea
          CLASS = case_when(ORDER %in% c('Araneae') ~ 'Arachnida',
                            ORDER == 'Isopoda' ~ 'Malacostraca', 
                            TRUE ~ 'Insecta'))%>%
@@ -84,7 +84,7 @@ otu.ct<-otu.melt%>%group_by(sample)%>%summarize(otus=length(unique(`#OTU ID`)))
 Order frequency, OTU richness, species richness from fecal samples  
 ```{r, eval=FALSE}
 ## what percent of each diet sample (otus) are 'diet'?
-prey<-c('Araneae','Coleoptera','Blattodea','Diptera','Lepidoptera','Orthoptera')
+prey.ords<-c('Araneae','Coleoptera','Diptera','Isopoda', 'Lepidoptera','Orthoptera')
 
 ## total by order
 id.ord<-otu.melt%>%
@@ -104,7 +104,7 @@ otu.l<-otu.melt%>%
 
 ## what percent of each diet sample (otus) are 'diet'?
 diet.perc<-otu.l%>%
-  mutate(type=ifelse(ORDER %in% c('Araneae','Coleoptera','Blattodea','Diptera','Lepidoptera','Orthoptera'), 'prey', 'not'))%>%
+  mutate(type=ifelse(ORDER %in% prey.ords, 'prey', 'not'))%>%
   group_by(sample, type)%>%
   summarize(n=sum(otus))%>%
   dcast(sample~type, fill=0)%>%
@@ -140,7 +140,7 @@ ord.id%>%ungroup()%>%dplyr::select(ORDER, samples, OTU, RRA, id_mean, otu_n_mean
   geom_bar(stat='identity')+
   facet_wrap(~variable, scales='free_x')+
   coord_flip()+
-  scale_x_discrete(limits=rev(c('Diptera','Lepidoptera','Orthoptera','Araneae','Coleoptera','Blattodea','Siphonaptera','Psocoptera','Hymenoptera')))
+  scale_x_discrete(limits=rev(c('Diptera','Lepidoptera','Orthoptera','Araneae','Coleoptera','Isopoda','Siphonaptera','Psocoptera','Hymenoptera')))
 
 ## figureo f diet frequency at order-level
 diet.freq<-ggplot(ord.id, aes(reorder(ORDER, samples), samples))+
@@ -386,6 +386,7 @@ OPLI = Opuntia littoralis; RHIN = Rhus integrifolia, SANI = Sambucus nigra; ERFA
 
 ```{r}
 ## read compiled data - cleaning occurs in CAWR_manuscript.R file
+## values reflect mg
 
 # ARTHROPOD DENSITY ACROSS HE
 ### time, ID, block, he,  order
@@ -416,6 +417,7 @@ canopy.he<-arth.time.he%>%filter(sampling_method == 'canopy')%>%ungroup()%>%dply
 ground.he<-arth.time.he%>%filter(sampling_method == 'ground')%>%ungroup()%>%dplyr::select(ID, he, Araneae, Coleoptera, Diptera, Blattodea, Lepidoptera, Orthoptera)%>%
   separate(ID, into=c('site','terr'), sep='_')%>%mutate(total=Araneae+Coleoptera+Diptera+Blattodea+Lepidoptera+Orthoptera)%>%filter(total!=0)%>%dplyr::select(-total)
 
+## units in mg he-1 block-1
 ```   
 
 #### Examining variation in arthropod composition aong habitat elements  
@@ -445,12 +447,15 @@ arth.terr.he.fix<-arth.veg.terr%>%mutate_at(vars(Acarina:Thysanura), funs(.*valu
 #write.csv(arth.terr, 'CAWR_arth_mg.csv', row.names=FALSE)
 # represents where each order comes form in each habitat
 
+# mg/m2
+
 ## veg PCA
 pca.veg<-prcomp(veg.cover%>%column_to_rownames('ID')%>%dplyr::select(ARCA:TOYON)%>%decostand('total'))
 summary(pca.veg)
 biplot(pca.veg)
 
 ## overall biomass, totalled across territory
+# this is broken
 canopy.terr<-arth.terr.he%>%group_by(ID, sampling_method)%>%
   summarize_at(vars(Acarina:Thysanura), funs(sum))%>%
   filter(sampling_method=='canopy')%>%ungroup()%>%
@@ -497,18 +502,6 @@ biplot(pca.prey.canopy.total)
 
 Territory-level metrics 
 ```{r}
-## aggregate data at territory (ID) level
-## bird reproductive data
-bird
-
-## vegetation cover
-veg.cover
-
-## territory-level estimates of arthropod biomass 
-canopy.terr
-ground.terr
-
-
 ## compile ALL variables at territory-level 
 terr.df<-bird%>%
   left_join(veg.cover)%>%
@@ -531,7 +524,7 @@ write.csv(terr.df, 'manuscript/CAWR_territory.csv', row.names=FALSE)
 
 ```{r}
 
-terr.df<-read.csv('manuscript/CAWR_territory.csv')
+terr.df<-read.csv('processed/CAWR_territory.csv')
 
 egg.terr<-terr.df%>%
   dplyr::select(egg_date, prey_canopy, prey_ground, ARCA:SANI, exotic:native.all, 
